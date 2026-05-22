@@ -58,7 +58,6 @@ from datetime import date, timedelta
 
 from commands._common import parse_kv
 
-
 def run(args):
     """Entry point.
 
@@ -66,4 +65,44 @@ def run(args):
         args.tag   — "key=value" string (REQUIRED)
         args.days  — int, default 7
     """
-    raise NotImplementedError("TODO: implement cost — see module docstring")
+    tag_key, tag_val = parse_kv(args.tag)
+    days = int(args.days or 7)
+
+    # Cost Explorer uses [Start, End) where End is exclusive.
+    end = date.today()
+    start = end - timedelta(days=days)
+
+    ce = boto3.client("ce")
+    resp = ce.get_cost_and_usage(
+        TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
+        Granularity="DAILY",
+        Metrics=["UnblendedCost"],
+        Filter={"Tags": {"Key": tag_key, "Values": [tag_val]}},
+        GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
+    )
+
+    per_service = defaultdict(float)
+    for day in resp.get("ResultsByTime", []):
+        for g in day.get("Groups", []):
+            service = (g.get("Keys") or ["Unknown"])[0]
+            amt_str = g.get("Metrics", {}).get("UnblendedCost", {}).get("Amount", "0")
+            try:
+                per_service[service] += float(amt_str)
+            except ValueError:
+                per_service[service] += 0.0
+
+    rows = sorted(per_service.items(), key=lambda kv: kv[1], reverse=True)
+    total = sum(v for _, v in rows)
+
+    # Dùng ASCII để tránh lỗi encoding trên Windows cp1252
+    print(
+        f"Cost for {tag_key}={tag_val} over last {days} days "
+        f"({start.isoformat()} -> {end.isoformat()}):"
+    )
+    print("-" * 60)
+
+    for service, amount in rows:
+        print(f"  {service:45} $ {amount:8.2f}")
+
+    print("-" * 60)
+    print(f"  {'TOTAL':45} $ {total:8.2f}")
